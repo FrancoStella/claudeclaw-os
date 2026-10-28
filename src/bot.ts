@@ -1268,11 +1268,13 @@ export function createBot(): Bot {
   bot.command('process_apps', async (ctx) => {
     if (!isAuthorised(ctx.chat!.id)) return;
     await ctx.reply('⚙️ Starting Medicare app processing...');
-    execFile(MEDICARE_PYTHON, [MEDICARE_SCRIPT], { timeout: 3600000 }, (err, stdout, stderr) => {
-      const output = stdout || stderr || (err?.message ?? 'No output');
+    execFile(MEDICARE_PYTHON, [MEDICARE_SCRIPT], { timeout: 3600000, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const out = (stdout || '').trim();
+      // Python logs and tracebacks go to stderr; the tail is where the real failure is.
+      const errTail = (stderr || '').split('\n').filter((l) => l && !/Warning|warnings\.warn/.test(l)).slice(-12).join('\n');
       const msg = err
-        ? `❌ Medicare processing error:\n${output.slice(0, 1000)}`
-        : `✅ Medicare processing complete:\n${output.slice(0, 1000)}`;
+        ? `❌ Medicare processing error (${(err as any).killed ? 'killed/timeout' : 'exit ' + (err as any).code}):\n${(errTail || out || err.message).slice(-1500)}`
+        : `✅ Medicare processing complete:\n${(out || errTail).slice(-1000)}`;
       bot.api.sendMessage(ctx.chat!.id, msg).catch(() => {});
     });
   });
