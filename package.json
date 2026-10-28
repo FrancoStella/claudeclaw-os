@@ -32,6 +32,8 @@
     "@types/three": "^0.184.0",
     "better-sqlite3": "^11.8.1",
     "cron-parser": "^5.5.0",
+    "dotenv": "^17.4.2",
+    "ghl-sdk": "^1.2.0",
     "grammy": "^1.34.0",
     "hono": "^4.12.3",
     "js-yaml": "^4.1.1",

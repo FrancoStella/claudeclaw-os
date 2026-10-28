@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execFile } from 'child_process';
 import { Api, Bot, Context, InputFile, RawApi } from 'grammy';
 
 import { runAgent, runAgentWithRetry, UsageInfo, AgentProgressEvent } from './agent.js';
@@ -885,6 +886,8 @@ export function createBot(): Bot {
     { command: 'delegate', description: 'Delegate task to agent' },
     { command: 'lock', description: 'Lock session (requires PIN to unlock)' },
     { command: 'status', description: 'Show security status' },
+    { command: 'process_apps', description: 'Process Medicare enrollment PDFs' },
+    { command: 'status_apps', description: 'Show Medicare apps waiting in inbox' },
   ];
   const skillCommands = discoverSkillCommands();
   const allCommands = [...builtInCommands, ...skillCommands].slice(0, 100); // Telegram limit: 100 commands
@@ -1258,6 +1261,56 @@ export function createBot(): Bot {
     await ctx.reply(lines.join('\n'));
   });
 
+  // ── Medicare automation commands ────────────────────────────────────
+  const MEDICARE_SCRIPT = path.join(os.homedir(), 'Projects', 'medicare-pdf-to-ghl', 'run.py');
+  const MEDICARE_PYTHON = '/usr/bin/python3';
+
+  bot.command('process_apps', async (ctx) => {
+    if (!isAuthorised(ctx.chat!.id)) return;
+    await ctx.reply('⚙️ Starting Medicare app processing...');
+    execFile(MEDICARE_PYTHON, [MEDICARE_SCRIPT], { timeout: 3600000 }, (err, stdout, stderr) => {
+      const output = stdout || stderr || (err?.message ?? 'No output');
+      const msg = err
+        ? `❌ Medicare processing error:\n${output.slice(0, 1000)}`
+        : `✅ Medicare processing complete:\n${output.slice(0, 1000)}`;
+      bot.api.sendMessage(ctx.chat!.id, msg).catch(() => {});
+    });
+  });
+
+  bot.command('status_apps', async (ctx) => {
+    if (!isAuthorised(ctx.chat!.id)) return;
+    execFile(MEDICARE_PYTHON, [MEDICARE_SCRIPT, '--status'], { timeout: 15000 }, (err, stdout, stderr) => {
+      const output = stdout || stderr || (err?.message ?? 'No output');
+      ctx.reply(output.trim() || 'No status available').catch(() => {});
+    });
+  });
+
+  // Medicare inline keyboard callback handler
+  bot.on('callback_query:data', async (ctx) => {
+    const data = ctx.callbackQuery.data;
+    const msgId = ctx.callbackQuery.message?.message_id;
+    if (!msgId) { await ctx.answerCallbackQuery(); return; }
+
+    const responseFile = '/tmp/medicare_callback_response.json';
+    const queueFile = '/tmp/medicare_callback_queue.json';
+
+    if (!fs.existsSync(queueFile)) { await ctx.answerCallbackQuery(); return; }
+
+    try {
+      const queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+      if (queue.status !== 'waiting' || queue.message_id !== msgId) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+      const parts = data.split(':');
+      const value = parts.length >= 2 ? parts.slice(1).join(':') : data;
+      fs.writeFileSync(responseFile, JSON.stringify({ message_id: msgId, value }));
+      await ctx.answerCallbackQuery('✓');
+    } catch {
+      await ctx.answerCallbackQuery();
+    }
+  });
+
   // /delegate — delegate task to an agent (handled via handleMessage delegation detection)
   // This command is intercepted by handleMessage's parseDelegation(),
   // but we register it so grammY doesn't pass it to the text handler.
@@ -1277,8 +1330,32 @@ export function createBot(): Bot {
     messageQueue.enqueue(chatIdStr, () => handleMessage(ctx, `/delegate ${args}`));
   });
 
+  // Forward typed text replies to Medicare automation when it's waiting for "Other" detail
+  bot.on('message:text', async (ctx, next) => {
+    const queueFile = '/tmp/medicare_callback_queue.json';
+    const responseFile = '/tmp/medicare_callback_response.json';
+    if (fs.existsSync(queueFile)) {
+      try {
+        const queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+        if (queue.status === 'waiting' && queue.accept_text) {
+          const text = ctx.message.text;
+          if (!text.startsWith('/')) {
+            fs.writeFileSync(responseFile, JSON.stringify({
+              message_id: queue.message_id,
+              field_prefix: queue.field_prefix,
+              value: text,
+            }));
+            await ctx.reply('✓ Got it');
+            return;
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    return next();
+  });
+
   // Text messages — and any slash commands not owned by this bot (skills, e.g. /todo /gmail)
-  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/agents', '/delegate', '/lock', '/status']);
+  const OWN_COMMANDS = new Set(['/start', '/help', '/newchat', '/respin', '/voice', '/model', '/memory', '/forget', '/pin', '/unpin', '/chatid', '/wa', '/slack', '/dashboard', '/stop', '/agents', '/delegate', '/lock', '/status', '/process_apps', '/status_apps']);
   bot.on('message:text', async (ctx) => {
     const text = ctx.message.text;
     const chatIdStr = ctx.chat!.id.toString();
